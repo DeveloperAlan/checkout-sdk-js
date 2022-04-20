@@ -5,16 +5,23 @@ import { getScriptLoader } from '@bigcommerce/script-loader';
 import { EventEmitter } from 'events';
 import { from, of } from 'rxjs';
 
+import { BillingAddressActionCreator, BillingAddressRequestSender } from '../../../billing';
 import { Cart } from '../../../cart';
 import { getCart } from '../../../cart/carts.mock';
-import { createCheckoutStore, CheckoutActionCreator, CheckoutActionType, CheckoutRequestSender, CheckoutStore } from '../../../checkout';
+import { createCheckoutStore, CheckoutActionCreator, CheckoutActionType, CheckoutRequestSender, CheckoutStore, CheckoutValidator } from '../../../checkout';
 import { getCheckout, getCheckoutStoreState } from '../../../checkout/checkouts.mock';
 import { InvalidArgumentError, MissingDataError, MissingDataErrorType } from '../../../common/error/errors';
 import { ConfigActionCreator, ConfigRequestSender } from '../../../config';
 import { FormFieldsActionCreator, FormFieldsRequestSender } from '../../../form';
+import { CountryActionCreator, CountryActionType, CountryRequestSender } from '../../../geography';
+import { getCountries } from '../../../geography/countries.mock';
+import { OrderActionCreator, OrderRequestSender } from '../../../order';
 import { PaymentMethod, PaymentMethodActionType } from '../../../payment';
 import { getPaypalCommerce } from '../../../payment/payment-methods.mock';
-import { PaypalCommercePaymentProcessor, PaypalCommerceRequestSender, PaypalCommerceScriptLoader, StyleButtonColor, StyleButtonLabel } from '../../../payment/strategies/paypal-commerce';
+import { ApproveActions, PaypalCommercePaymentProcessor, PaypalCommerceRequestSender, PaypalCommerceScriptLoader, StyleButtonColor, StyleButtonLabel } from '../../../payment/strategies/paypal-commerce';
+import { ConsignmentActionCreator, ConsignmentActionType, ConsignmentRequestSender } from '../../../shipping';
+import { getShippingOptions } from '../../../shipping/shipping-options.mock';
+import { SubscriptionsActionCreator, SubscriptionsRequestSender } from '../../../subscription';
 import { CheckoutButtonInitializeOptions } from '../../checkout-button-options';
 import CheckoutButtonMethodType from '../checkout-button-method-type';
 
@@ -24,6 +31,8 @@ import PaypalCommerceButtonStrategy from './paypal-commerce-button-strategy';
 describe('PaypalCommerceButtonStrategy', () => {
     let store: CheckoutStore;
     let checkoutActionCreator: CheckoutActionCreator;
+    let orderActionCreator: OrderActionCreator;
+    let countryActionCreator: CountryActionCreator;
     let formPoster: FormPoster;
     let paypalOptions: PaypalCommerceButtonInitializeOptions;
     let options: CheckoutButtonInitializeOptions;
@@ -32,10 +41,14 @@ describe('PaypalCommerceButtonStrategy', () => {
     let requestSender: RequestSender;
     let paymentMethod: PaymentMethod;
     let orderID: string;
+    let actions: ApproveActions;
     let paypalCommercePaymentProcessor: PaypalCommercePaymentProcessor;
     let cart: Cart;
     let fundingSource: string;
     let messageContainer: HTMLDivElement;
+    let consignmentActionCreator: ConsignmentActionCreator;
+    let consignmentRequestSender: ConsignmentRequestSender;
+    let billingAdressActionCreator: BillingAddressActionCreator;
 
     beforeEach(() => {
         store = createCheckoutStore(getCheckoutStoreState());
@@ -44,6 +57,15 @@ describe('PaypalCommerceButtonStrategy', () => {
         cart = { ...getCart() };
         formPoster = createFormPoster();
 
+        orderActionCreator = new OrderActionCreator(
+            new OrderRequestSender(requestSender),
+            new CheckoutValidator(new CheckoutRequestSender(requestSender))
+        );
+
+        countryActionCreator = new CountryActionCreator(new CountryRequestSender(requestSender, {}));
+        consignmentRequestSender = new ConsignmentRequestSender(requestSender);
+        billingAdressActionCreator = new BillingAddressActionCreator(new BillingAddressRequestSender(requestSender), new SubscriptionsActionCreator(new SubscriptionsRequestSender(requestSender)));
+
         checkoutActionCreator = new CheckoutActionCreator(
             new CheckoutRequestSender(requestSender),
             new ConfigActionCreator(new ConfigRequestSender(requestSender)),
@@ -51,6 +73,10 @@ describe('PaypalCommerceButtonStrategy', () => {
         );
         paypalCommercePaymentProcessor = new PaypalCommercePaymentProcessor(new PaypalCommerceScriptLoader(getScriptLoader()), new PaypalCommerceRequestSender(requestSender));
         eventEmitter = new EventEmitter();
+        consignmentActionCreator = new ConsignmentActionCreator(
+            consignmentRequestSender,
+            new CheckoutRequestSender(requestSender)
+        );
 
         paypalOptions = {
             style: {
@@ -67,14 +93,125 @@ describe('PaypalCommerceButtonStrategy', () => {
             paypalCommerce: paypalOptions,
         };
 
+        const payerDetails = {
+                payer: {
+                    name: {
+                        given_name: 'Andrew',
+                        surname: 'Brown',
+                    },
+                    email_address: 'test@bigcommerce.com',
+                    payer_id: '123',
+                    address: {
+                        country_code: '123',
+                    },
+                },
+                purchase_units: [ {
+                    reference_id: '123',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100',
+                    },
+                    payee: {
+                        email_address: 'test@bigcommerce.com',
+                        merchant_id: '123',
+                    },
+                    shipping: {
+                        address: {
+                            address_line_1: '',
+                            address_area_1: '',
+                            address_area2: '',
+                            country_code: 'USD',
+                            postal_code: '968',
+                        },
+                        name: {
+                            full_name: 'ANDREW BROWN',
+                        },
+                    },
+                } ],
+        };
+
+        const onShippingChangeData = {
+            amount: {
+                breakdown: {
+                    item_total: {
+                        currency_code: 'USD',
+                        value: '100',
+                    },
+                shipping: {
+                    currency_code: 'USD',
+                    value: '100',
+                },
+                tax_total: {
+                    currency_code: 'USD',
+                    value: '100',
+                },
+                },
+                currency_code: 'USD',
+                value: '100',
+            },
+            orderID: '123',
+            payment_token: 'PAYMENT_TOKEN',
+            shipping_address: {
+                city: 'Los-Angeles',
+                postal_code: '08547',
+                country_code: 'US',
+                state: 'CA',
+            },
+            selected_shipping_option: {
+                id: '123',
+                amount: {
+                    currency_code: 'USD',
+                        value: '100',
+                },
+            },
+        };
+
         orderID = 'ORDER_ID';
         fundingSource = 'paypal';
+        actions = {
+            order: {
+                capture: jest.fn(() => new Promise(resolve => {
+                    return resolve(payerDetails);
+                })),
+                authorize: jest.fn(() => new Promise(resolve => {
+                    return resolve(payerDetails);
+                })),
+                patch: jest.fn(() => new Promise(resolve => {
+                    return resolve('TEST') ;
+                })),
+            },
+            resolve: jest.fn().mockReturnValue(Promise.resolve()),
+            reject: jest.fn().mockReturnValue(Promise.reject()),
+         };
 
         jest.spyOn(checkoutActionCreator, 'loadDefaultCheckout')
             .mockReturnValue(() => {
                 return from([
                     createAction(CheckoutActionType.LoadCheckoutRequested),
                     createAction(CheckoutActionType.LoadCheckoutSucceeded, getCheckout()),
+                ]);
+            });
+
+        jest.spyOn(countryActionCreator, 'loadCountries')
+            .mockReturnValue(() => {
+                return from([
+                    createAction(CountryActionType.LoadCountriesRequested),
+                    createAction(CountryActionType.LoadCountriesSucceeded, getCountries()),
+                ]);
+            });
+
+        jest.spyOn(consignmentActionCreator, 'loadShippingOptions')
+            .mockReturnValue(() => {
+                return from([
+                    createAction(ConsignmentActionType.LoadShippingOptionsRequested),
+                    createAction(ConsignmentActionType.LoadShippingOptionsSucceeded, getShippingOptions()),
+                ]);
+            });
+        jest.spyOn(consignmentActionCreator, 'updateConsignment')
+            .mockReturnValue(() => {
+                return from([
+                    createAction(ConsignmentActionType.UpdateConsignmentRequested),
+                    createAction(ConsignmentActionType.UpdateConsignmentSucceeded, getCheckout()),
                 ]);
             });
 
@@ -93,7 +230,13 @@ describe('PaypalCommerceButtonStrategy', () => {
 
                 eventEmitter.on('onApprove', () => {
                     if (options.onApprove) {
-                        options.onApprove({ orderID });
+                        options.onApprove({ orderID }, actions);
+                    }
+                });
+
+                eventEmitter.on('onShippingChange', () => {
+                    if (options.onShippingChange) {
+                        options.onShippingChange(onShippingChangeData, actions);
                     }
                 });
             });
@@ -108,7 +251,11 @@ describe('PaypalCommerceButtonStrategy', () => {
             store,
             checkoutActionCreator,
             formPoster,
-            paypalCommercePaymentProcessor
+            paypalCommercePaymentProcessor,
+            orderActionCreator,
+            countryActionCreator,
+            consignmentActionCreator,
+            billingAdressActionCreator
         );
 
         if (paypalOptions.messagingContainer != null) {
@@ -133,11 +280,7 @@ describe('PaypalCommerceButtonStrategy', () => {
             currency: 'USD',
             intent: 'capture',
             components: ['buttons', 'messages'],
-            'disable-funding': [
-                'card',
-                'credit',
-                'paylater',
-            ],
+            'disable-funding': [ 'card', 'credit', 'paylater'],
         };
 
         expect(paypalCommercePaymentProcessor.initialize).toHaveBeenCalledWith(obj);
@@ -155,19 +298,14 @@ describe('PaypalCommerceButtonStrategy', () => {
                 currency: 'USD',
                 intent: 'capture',
                 components: ['buttons', 'messages'],
-                'disable-funding': [
-                    'card',
-                ],
-                'enable-funding': [
-                    'credit',
-                    'paylater',
-                ],
+                'disable-funding': [ 'card'],
+                'enable-funding': ['credit', 'paylater'],
         };
 
         expect(paypalCommercePaymentProcessor.initialize).toHaveBeenCalledWith(obj);
     });
 
-    it('authorize', async () => {
+    it('Loads with intent authorize', async () => {
         paymentMethod.initializationData.isPayPalCreditAvailable = true;
         paymentMethod.initializationData.intent = 'authorize';
         await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
@@ -180,19 +318,14 @@ describe('PaypalCommerceButtonStrategy', () => {
             currency: 'USD',
             intent: 'authorize',
             components: ['buttons', 'messages'],
-            'disable-funding': [
-                'card',
-            ],
-            'enable-funding': [
-                'credit',
-                'paylater',
-            ],
+            'disable-funding': ['card'],
+            'enable-funding': ['credit', 'paylater'],
         };
 
         expect(paypalCommercePaymentProcessor.initialize).toHaveBeenCalledWith(obj);
     });
 
-    it('isHosted', async () => {
+    it('Do not call formPoster if isHosted true in initializationData', async () => {
         paymentMethod.initializationData.isHosted = true;
         await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
 
@@ -200,6 +333,51 @@ describe('PaypalCommerceButtonStrategy', () => {
         eventEmitter.emit('onApprove');
 
         expect(formPoster.postForm).toHaveBeenCalledTimes(0);
+    });
+
+    it('calls order capture', async () => {
+        paymentMethod.initializationData.isHosted = true;
+        paymentMethod.initializationData.intent = 'capture';
+        await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
+
+        await strategy.initialize(options);
+        eventEmitter.emit('onApprove');
+
+        expect(actions.order.capture).toHaveBeenCalled();
+    });
+
+    it('calls order authorize', async () => {
+        paymentMethod.initializationData.isHosted = true;
+        paymentMethod.initializationData.intent = 'authorize';
+        await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
+
+        await strategy.initialize(options);
+        eventEmitter.emit('onApprove');
+
+        expect(actions.order.authorize).toHaveBeenCalled();
+    });
+
+    it('calls actions.order.patch', async () => {
+        jest.spyOn(consignmentActionCreator, 'createConsignments').mockReturnValue(ConsignmentActionType.CreateConsignmentsSucceeded);
+        jest.spyOn(countryActionCreator, 'loadCountries')
+            .mockImplementation( () => Promise.resolve([{
+                code: 'US',
+                hasPostalCodes: true,
+                id: 1,
+                name: 'United States',
+                requiresState: false,
+                subdivisions: [{
+                    code: 'CA',
+                    id: 12,
+                    name: 'California',
+                }],
+            }]));
+        await strategy.initialize(options);
+        eventEmitter.emit('onClick');
+        eventEmitter.emit('onShippingChange');
+        await new Promise(resolve => process.nextTick(resolve));
+
+        expect(actions.order.patch).toHaveBeenCalled();
     });
 
     it('initializes PaypalCommerce with enabled APMs', async () => {
@@ -216,23 +394,99 @@ describe('PaypalCommerceButtonStrategy', () => {
                 currency: 'USD',
                 intent: 'capture',
                 components: ['buttons', 'messages'],
-                'disable-funding': [
-                    'card',
-                    'sepa',
-                    'venmo',
-                    'credit',
-                    'paylater',
-                ],
-                'enable-funding': [
-                    'sofort',
-                    'mybank',
-                ],
+                'disable-funding': ['card', 'sepa', 'venmo', 'credit', 'paylater'],
+                'enable-funding': ['sofort', 'mybank'],
         };
 
         expect(paypalCommercePaymentProcessor.initialize).toHaveBeenCalledWith(obj);
     });
 
-    it('no messages', async () => {
+    it('call createConsignments', async () => {
+        paymentMethod.initializationData.isHosted = true;
+        await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
+        const action = ConsignmentActionType.CreateConsignmentsSucceeded;
+        jest.spyOn(consignmentActionCreator, 'createConsignments').mockReturnValue(action);
+        jest.spyOn(store, 'dispatch');
+        consignmentActionCreator.createConsignments = jest.fn();
+        await strategy.initialize(options);
+        eventEmitter.emit('onClick');
+        await new Promise(resolve => process.nextTick(resolve));
+        eventEmitter.emit('onShippingChange');
+        await new Promise(resolve => process.nextTick(resolve));
+        eventEmitter.emit('onApprove');
+        await new Promise(resolve => process.nextTick(resolve));
+
+        expect(consignmentActionCreator.createConsignments).toHaveBeenCalled();
+    });
+
+    // it('call updateConsignment', async () => {
+    //     paymentMethod.initializationData.isHosted = true;
+    //     await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
+    //     const action = ConsignmentActionType.CreateConsignmentsSucceeded;
+    //     jest.spyOn(consignmentActionCreator, 'createConsignments').mockReturnValue(action);
+    //     jest.spyOn(billingAdressActionCreator, 'updateAddress').mockReturnValue(BillingAddressActionType.UpdateBillingAddressSucceeded);
+    //     jest.spyOn(store, 'dispatch');
+    //     consignmentActionCreator.updateConsignment = jest.fn();
+    //     await strategy.initialize(options);
+    //     eventEmitter.emit('onClick');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //     eventEmitter.emit('onShippingChange');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //     eventEmitter.emit('onApprove');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //
+    //     expect(consignmentActionCreator.updateConsignment).toHaveBeenCalled();
+    // });
+
+    // it('call submitOrder', async () => {
+    //     paymentMethod.initializationData.isHosted = true;
+    //     await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
+    //     const action = ConsignmentActionType.CreateConsignmentsSucceeded;
+    //     jest.spyOn(consignmentActionCreator, 'createConsignments').mockReturnValue(action);
+    //     jest.spyOn(billingAdressActionCreator, 'updateAddress').mockReturnValue(BillingAddressActionType.UpdateBillingAddressSucceeded);
+    //     jest.spyOn(store, 'dispatch');
+    //     orderActionCreator.submitOrder = jest.fn();
+    //     await strategy.initialize(options);
+    //     eventEmitter.emit('onClick');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //     eventEmitter.emit('onShippingChange');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //     eventEmitter.emit('onApprove');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //
+    //     expect(orderActionCreator.submitOrder).toHaveBeenCalled();
+    // });
+
+    it('goes to checkout page when initializationData.isHosted = false', async () => {
+        paymentMethod.initializationData.isHosted = false;
+        await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
+        await strategy.initialize(options);
+        eventEmitter.emit('onApprove');
+        await new Promise(resolve => process.nextTick(resolve));
+        expect(formPoster.postForm).toHaveBeenCalled();
+    });
+
+    // it('call deleteCart', async () => {
+    //     paymentMethod.initializationData.isHosted = true;
+    //     await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
+    //     const action = ConsignmentActionType.CreateConsignmentsSucceeded;
+    //     jest.spyOn(consignmentActionCreator, 'createConsignments').mockReturnValue(action);
+    //     jest.spyOn(store, 'dispatch');
+    //     jest.spyOn(orderActionCreator, 'submitOrder').mockReturnValue(OrderActionType.SubmitOrderSucceeded);
+    //     jest.spyOn(billingAdressActionCreator, 'updateAddress').mockReturnValue(BillingAddressActionType.UpdateBillingAddressSucceeded);
+    //     paypalCommercePaymentProcessor.deleteCart = jest.fn();
+    //     await strategy.initialize(options);
+    //     eventEmitter.emit('onClick');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //     eventEmitter.emit('onShippingChange');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //     eventEmitter.emit('onApprove');
+    //     await new Promise(resolve => process.nextTick(resolve));
+    //
+    //     expect(paypalCommercePaymentProcessor.deleteCart).toHaveBeenCalled();
+    // });
+
+    it('does not render any paypal message', async () => {
         await strategy.initialize({...options, paypalCommerce: {messagingContainer: undefined}});
 
         expect(paypalCommercePaymentProcessor.renderMessages).toHaveBeenCalledTimes(0);
@@ -251,15 +505,7 @@ describe('PaypalCommerceButtonStrategy', () => {
                 currency: 'USD',
                 intent: 'capture',
                 components: ['buttons', 'messages'],
-                'disable-funding': [
-                    'card',
-                    'sepa',
-                    'venmo',
-                    'sofort',
-                    'mybank',
-                    'credit',
-                    'paylater',
-                ],
+                'disable-funding': [ 'card', 'sepa', 'venmo', 'sofort', 'mybank', 'credit', 'paylater'],
         };
 
         expect(paypalCommercePaymentProcessor.initialize).toHaveBeenCalledWith(obj);
@@ -288,43 +534,9 @@ describe('PaypalCommerceButtonStrategy', () => {
 
     it('render PayPal messaging with banner element', async () => {
         await store.dispatch(of(createAction(PaymentMethodActionType.LoadPaymentMethodsSucceeded, [paymentMethod])));
-
         await strategy.initialize(options);
 
         expect(paypalCommercePaymentProcessor.renderMessages).toHaveBeenCalledWith(cart.cartAmount, `#${paypalOptions.messagingContainer}`);
-    });
-
-    it('post payment details to server to set checkout data when PayPalCommerce payment details are tokenized', async () => {
-        await strategy.initialize(options);
-
-        eventEmitter.emit('onApprove');
-
-        await new Promise(resolve => process.nextTick(resolve));
-
-        expect(formPoster.postForm).toHaveBeenCalledWith('/checkout.php', expect.objectContaining({
-            payment_type: 'paypal',
-            action: 'set_external_checkout',
-            provider: 'paypalcommerce',
-            order_id: orderID,
-        }));
-    });
-
-    it('post payment details with credit to server to set checkout data when PayPalCommerce payment details are tokenized', async () => {
-        fundingSource = 'credit';
-
-        await strategy.initialize(options);
-
-        eventEmitter.emit('onClick');
-        eventEmitter.emit('onApprove');
-
-        await new Promise(resolve => process.nextTick(resolve));
-
-        expect(formPoster.postForm).toHaveBeenCalledWith('/checkout.php', expect.objectContaining({
-            payment_type: 'paypal',
-            action: 'set_external_checkout',
-            provider: 'paypalcommercecredit',
-            order_id: orderID,
-        }));
     });
 
     describe('throws error during initialize', () => {
@@ -337,7 +549,11 @@ describe('PaypalCommerceButtonStrategy', () => {
                 store,
                 checkoutActionCreator,
                 formPoster,
-                paypalCommercePaymentProcessor
+                paypalCommercePaymentProcessor,
+                orderActionCreator,
+                countryActionCreator,
+                consignmentActionCreator,
+                billingAdressActionCreator
             );
 
             try {
@@ -354,7 +570,11 @@ describe('PaypalCommerceButtonStrategy', () => {
                     store,
                     checkoutActionCreator,
                     formPoster,
-                    paypalCommercePaymentProcessor
+                    paypalCommercePaymentProcessor,
+                    orderActionCreator,
+                    countryActionCreator,
+                    consignmentActionCreator,
+                    billingAdressActionCreator
                 );
 
                 options = {
@@ -378,7 +598,11 @@ describe('PaypalCommerceButtonStrategy', () => {
                 store,
                 checkoutActionCreator,
                 formPoster,
-                paypalCommercePaymentProcessor
+                paypalCommercePaymentProcessor,
+                orderActionCreator,
+                countryActionCreator,
+                consignmentActionCreator,
+                billingAdressActionCreator
             );
             const checkout = getCheckout();
             delete checkout.cart;
